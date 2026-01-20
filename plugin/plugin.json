@@ -1,0 +1,7 @@
+{
+  "name": "context-memory",
+  "version": "1.0.0",
+  "description": "Context-rot-resistant memory for Claude Code. Store and recall facts with staleness tracking and relationship linking.",
+  "author": "praneethpuligundla",
+  "homepage": "https://github.com/praneethpuligundla/context-memory"
+}

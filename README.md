@@ -13,24 +13,48 @@ Context-rot-resistant memory MCP server for Claude Code.
 
 ## Installation
 
+### Build
+
 ```bash
 cargo build --release
 ```
 
-## Usage
+### Option 1: Claude Code Plugin (Recommended)
 
-Add to your Claude Code MCP configuration:
+1. Create plugin directory and symlink:
+```bash
+ln -sf /path/to/context-memory/plugin ~/.claude/plugins/context-memory
+```
+
+2. Enable in `~/.claude/settings.json`:
+```json
+{
+  "enabledPlugins": {
+    "context-memory@local": true
+  }
+}
+```
+
+3. Restart Claude Code
+
+### Option 2: Standalone MCP Server
+
+Add to `~/.claude/.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "context-memory": {
-      "command": "/path/to/context-memory",
-      "args": ["--db", "~/.context-memory.db"]
+      "command": "/path/to/context-memory/target/release/context-memory",
+      "args": []
     }
   }
 }
 ```
+
+## Database Location
+
+The database is stored at `~/.claude/context-memory/memory.db` by default.
 
 ## MCP Tools
 
