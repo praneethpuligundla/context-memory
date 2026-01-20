@@ -9,7 +9,7 @@ use crate::{Category, Certainty, FactFilter, Importance, RelationType, Scope, So
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_router,
+    tool, tool_handler, tool_router,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use schemars::JsonSchema;
@@ -410,6 +410,7 @@ impl ContextMemoryServer {
     }
 }
 
+#[tool_handler]
 impl ServerHandler for ContextMemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
