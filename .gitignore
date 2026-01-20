@@ -1,0 +1,19 @@
+
+# Ultraharness local files
+claude-progress.txt
+claude-features.json
+.claude/fic-*.json
+.claude/.claude-harness-initialized
+
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+.DS_Store
+*.zip

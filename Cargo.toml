@@ -1,0 +1,60 @@
+[package]
+name = "context-memory"
+version = "0.1.0"
+edition = "2021"
+description = "Context-rot-resistant memory MCP server for Claude Code"
+license = "MIT"
+
+[[bin]]
+name = "context-memory"
+path = "src/main.rs"
+
+[lib]
+name = "context_memory"
+path = "src/lib.rs"
+
+[dependencies]
+# MCP Protocol (official Rust SDK)
+rmcp = { version = "0.13", features = ["server", "transport-io", "macros"] }
+
+# JSON Schema generation (must match rmcp's version)
+schemars = "1.2"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
+
+# JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUIDs
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hashing (for content hashes)
+sha2 = "0.10"
+hex = "0.4"
+
+# Regex for search
+regex = "1.10"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Home directory
+dirs = "5.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
