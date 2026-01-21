@@ -1,9 +1,6 @@
 
-# Ultraharness local files
-claude-progress.txt
-claude-features.json
-.claude/fic-*.json
-.claude/.claude-harness-initialized
+# Claude local files
+/.claude/
 
 # Build artifacts
 /target/
