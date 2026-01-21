@@ -17,3 +17,6 @@ claude-features.json
 .env
 .DS_Store
 *.zip
+
+# Documentation (local planning)
+/docs/
