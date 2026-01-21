@@ -2,7 +2,7 @@
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crate::error::{MemoryError, Result};
 use crate::types::Fact;
@@ -11,6 +11,16 @@ use crate::validation::{MAX_TOPICS_PER_FACT, MAX_TOPIC_LENGTH};
 /// Cached regex for extracting hashtags from content.
 static HASHTAG_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"#(\w+)").expect("Invalid hashtag regex"));
+
+/// Tokenize a search query into individual terms.
+/// Returns lowercased terms for case-insensitive matching.
+pub fn tokenize_query(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
+}
 
 /// Compute SHA-256 hash of file content for staleness detection.
 ///
@@ -120,21 +130,29 @@ pub fn get_git_commit() -> Option<String> {
         })
 }
 
-/// Get the project root directory.
+/// Cached project root to avoid repeated subprocess calls.
+static PROJECT_ROOT_CACHE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Get the project root directory (cached).
 ///
 /// Tries to find the git repository root, falling back to the current working directory.
 /// Returns a canonicalized absolute path (resolves symlinks).
+/// The result is cached for the lifetime of the process.
 pub fn get_project_root() -> Option<String> {
-    // Try git root first
-    if let Some(git_root) = get_git_root() {
-        return canonicalize_path(&git_root);
-    }
+    PROJECT_ROOT_CACHE
+        .get_or_init(|| {
+            // Try git root first
+            if let Some(git_root) = get_git_root() {
+                return canonicalize_path(&git_root);
+            }
 
-    // Fall back to current working directory
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().to_string())
+            // Fall back to current working directory
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .clone()
 }
 
 /// Get the git repository root directory.

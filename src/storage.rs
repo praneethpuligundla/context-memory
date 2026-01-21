@@ -498,41 +498,80 @@ impl Storage {
     // ========================================================================
 
     /// Full-text search with optional filters.
-    /// Uses time-weighted retrieval: recent facts score higher than old ones.
+    /// Uses synonym expansion for better recall.
     /// If project_path is provided in filter, searches only that project.
     pub fn search(&self, query: &str, filter: &FactFilter, limit: usize) -> Result<Vec<Fact>> {
-        // Time-weighted retrieval: factor in recency
-        // Formula: score = confidence * importance_weight * time_decay
-        // time_decay = 1.0 / (1.0 + days_since_access / 30)
-        let mut sql = String::from(
-            r#"
-            SELECT f.id, f.content, f.project_path, f.session_id, f.source, f.source_type, f.source_content_hash,
-                   f.git_commit, f.confidence, f.certainty, f.created_at, f.last_verified,
-                   f.stale, f.category, f.importance, f.scope, f.derived_from, f.supersedes,
-                   f.access_count, f.last_accessed,
-                   -- Time-weighted score calculation
-                   f.confidence *
-                   CASE f.importance
-                       WHEN 'critical' THEN 4.0
-                       WHEN 'high' THEN 2.0
-                       WHEN 'normal' THEN 1.0
-                       WHEN 'low' THEN 0.5
-                       ELSE 1.0
-                   END *
-                   (1.0 / (1.0 + COALESCE(
-                       (julianday('now') - julianday(f.last_accessed)) / 30.0,
-                       (julianday('now') - julianday(f.created_at)) / 30.0
-                   ))) as time_weighted_score
-            FROM facts f
-            "#,
-        );
+        let use_fts = !query.trim().is_empty();
+
+        // Build FTS5 query (sanitized for safe matching)
+        let fts_query = if use_fts {
+            sanitize_fts5_query(query)
+        } else {
+            String::new()
+        };
+
+        // Tokenize query for topic matching
+        let query_terms = crate::utils::tokenize_query(query);
+
+        // Build the query using FTS5 for fast content search
+        // Use UNION to combine FTS5 content matches with topic matches
+        let mut sql = if use_fts && !query_terms.is_empty() {
+            format!(
+                r#"
+                WITH matched_ids AS (
+                    -- FTS5 content matches
+                    SELECT f.rowid as fact_rowid
+                    FROM facts f
+                    JOIN facts_fts fts ON f.rowid = fts.rowid
+                    WHERE facts_fts MATCH ?
+                    UNION
+                    -- Topic matches (exact match on query terms)
+                    SELECT f.rowid as fact_rowid
+                    FROM facts f
+                    JOIN fact_topics ft ON f.id = ft.fact_id
+                    WHERE ft.topic IN ({})
+                )
+                SELECT DISTINCT f.id, f.content, f.project_path, f.session_id, f.source, f.source_type, f.source_content_hash,
+                       f.git_commit, f.confidence, f.certainty, f.created_at, f.last_verified,
+                       f.stale, f.category, f.importance, f.scope, f.derived_from, f.supersedes,
+                       f.access_count, f.last_accessed,
+                       (f.confidence * CASE f.importance WHEN 'critical' THEN 4.0 WHEN 'high' THEN 2.0 WHEN 'normal' THEN 1.0 ELSE 0.5 END) as score
+                FROM facts f
+                JOIN matched_ids m ON f.rowid = m.fact_rowid
+                "#,
+                query_terms.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+            )
+        } else if use_fts {
+            // Query has no tokenizable terms, just use FTS5
+            String::from(
+                r#"
+                SELECT DISTINCT f.id, f.content, f.project_path, f.session_id, f.source, f.source_type, f.source_content_hash,
+                       f.git_commit, f.confidence, f.certainty, f.created_at, f.last_verified,
+                       f.stale, f.category, f.importance, f.scope, f.derived_from, f.supersedes,
+                       f.access_count, f.last_accessed,
+                       (f.confidence * CASE f.importance WHEN 'critical' THEN 4.0 WHEN 'high' THEN 2.0 WHEN 'normal' THEN 1.0 ELSE 0.5 END) as score
+                FROM facts f
+                JOIN facts_fts fts ON f.rowid = fts.rowid
+                WHERE facts_fts MATCH ?
+                "#,
+            )
+        } else {
+            String::from(
+                r#"
+                SELECT DISTINCT f.id, f.content, f.project_path, f.session_id, f.source, f.source_type, f.source_content_hash,
+                       f.git_commit, f.confidence, f.certainty, f.created_at, f.last_verified,
+                       f.stale, f.category, f.importance, f.scope, f.derived_from, f.supersedes,
+                       f.access_count, f.last_accessed,
+                       (f.confidence * CASE f.importance WHEN 'critical' THEN 4.0 WHEN 'high' THEN 2.0 WHEN 'normal' THEN 1.0 ELSE 0.5 END) as score
+                FROM facts f
+                "#,
+            )
+        };
 
         let mut conditions: Vec<String> = Vec::new();
-        // Always exclude archived facts from search
         conditions.push("f.archived = 0".to_string());
 
-        // Project filtering: if not all_projects, filter to specific project
-        // Facts with NULL project_path are considered "global" and always included
+        // Project filtering
         let project_filter = if filter.all_projects {
             None
         } else {
@@ -540,7 +579,6 @@ impl Storage {
         };
         let use_project_filter = project_filter.is_some();
         if use_project_filter {
-            // Include facts from current project OR facts with no project (global)
             conditions.push("(f.project_path = ? OR f.project_path IS NULL)".to_string());
         }
 
@@ -548,15 +586,6 @@ impl Storage {
         let use_session_filter = filter.session_id.is_some();
         if use_session_filter {
             conditions.push("f.session_id = ?".to_string());
-        }
-
-        // Sanitize query to prevent FTS5 injection
-        let sanitized_query = sanitize_fts5_query(query);
-        let use_fts = !sanitized_query.is_empty();
-
-        if use_fts {
-            sql.push_str("JOIN facts_fts fts ON f.rowid = fts.rowid ");
-            conditions.push("facts_fts MATCH ?".to_string());
         }
 
         if filter.category.is_some() {
@@ -590,22 +619,28 @@ impl Storage {
             sql.push_str(&conditions.join(" AND "));
         }
 
-        sql.push_str(" ORDER BY time_weighted_score DESC, f.importance DESC LIMIT ?");
+        sql.push_str(" ORDER BY score DESC, f.importance DESC LIMIT ?");
 
         let mut stmt = self.conn.prepare(&sql)?;
 
         let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        // Project filter comes first (after archived which is hardcoded)
+        // FTS5 query and topic terms come first (for the CTE)
+        if use_fts {
+            bind_params.push(Box::new(fts_query.clone()));
+            // Add each query term for the topic IN clause
+            for term in &query_terms {
+                bind_params.push(Box::new(term.clone()));
+            }
+        }
+
+        // Project filter
         if let Some(project) = project_filter {
             bind_params.push(Box::new(project));
         }
         // Session filter
         if let Some(session_id) = &filter.session_id {
             bind_params.push(Box::new(session_id.clone()));
-        }
-        if use_fts {
-            bind_params.push(Box::new(sanitized_query));
         }
         if let Some(cat) = &filter.category {
             bind_params.push(Box::new(format!("{:?}", cat).to_lowercase()));
@@ -635,19 +670,33 @@ impl Storage {
 
         let params: Vec<&dyn rusqlite::ToSql> = bind_params.iter().map(|b| b.as_ref()).collect();
 
-        let facts = stmt
+        let mut facts: Vec<Fact> = stmt
             .query_map(params.as_slice(), |row| self.row_to_fact(row))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // Load topics and evidence for each fact
-        let mut result = Vec::new();
-        for mut fact in facts {
-            fact.topics = self.get_topics(fact.id)?;
-            fact.evidence = self.get_evidence(fact.id)?;
-            result.push(fact);
+        // Batch load topics and evidence (avoids N+1 query problem)
+        if !facts.is_empty() {
+            let fact_ids: Vec<String> = facts.iter().map(|f| f.id.to_string()).collect();
+
+            // Batch load topics
+            let topics_map = self.get_topics_batch(&fact_ids)?;
+
+            // Batch load evidence
+            let evidence_map = self.get_evidence_batch(&fact_ids)?;
+
+            // Assign to facts
+            for fact in &mut facts {
+                let id_str = fact.id.to_string();
+                if let Some(topics) = topics_map.get(&id_str) {
+                    fact.topics = topics.clone();
+                }
+                if let Some(evidence) = evidence_map.get(&id_str) {
+                    fact.evidence = evidence.clone();
+                }
+            }
         }
 
-        Ok(result)
+        Ok(facts)
     }
 
     /// Get all facts (with optional filter).
@@ -967,6 +1016,33 @@ impl Storage {
         Ok(topics)
     }
 
+    /// Batch load topics for multiple facts (avoids N+1 queries).
+    fn get_topics_batch(&self, fact_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        use std::collections::HashMap;
+
+        if fact_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT fact_id, topic FROM fact_topics WHERE fact_id IN ({})", placeholders);
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let params: Vec<&dyn rusqlite::ToSql> = fact_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        let mut result: HashMap<String, Vec<String>> = HashMap::new();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for row in rows {
+            let (fact_id, topic) = row?;
+            result.entry(fact_id).or_default().push(topic);
+        }
+
+        Ok(result)
+    }
+
     fn get_evidence(&self, fact_id: Uuid) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -975,6 +1051,33 @@ impl Storage {
             .query_map(params![fact_id.to_string()], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(evidence)
+    }
+
+    /// Batch load evidence for multiple facts (avoids N+1 queries).
+    fn get_evidence_batch(&self, fact_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        use std::collections::HashMap;
+
+        if fact_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT fact_id, evidence FROM fact_evidence WHERE fact_id IN ({})", placeholders);
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let params: Vec<&dyn rusqlite::ToSql> = fact_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        let mut result: HashMap<String, Vec<String>> = HashMap::new();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for row in rows {
+            let (fact_id, evidence) = row?;
+            result.entry(fact_id).or_default().push(evidence);
+        }
+
+        Ok(result)
     }
 
     /// Mark fact as accessed (increment counter, update timestamp, boost confidence).

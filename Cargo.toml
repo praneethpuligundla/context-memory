@@ -9,6 +9,14 @@ license = "MIT"
 name = "context-memory"
 path = "src/main.rs"
 
+[[bin]]
+name = "benchmark"
+path = "benches/effectiveness.rs"
+
+[[bin]]
+name = "profile"
+path = "benches/profile_search.rs"
+
 [lib]
 name = "context_memory"
 path = "src/lib.rs"
