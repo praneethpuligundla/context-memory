@@ -10,6 +10,16 @@ use super::fact::Fact;
 /// Filters for querying facts.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FactFilter {
+    /// Filter to a specific project path. If not set and all_projects is false,
+    /// defaults to current project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    /// If true, search across all projects. If false (default), filter to current project.
+    #[serde(default)]
+    pub all_projects: bool,
+    /// Filter to a specific session ID. If set, only returns facts from that session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topics: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

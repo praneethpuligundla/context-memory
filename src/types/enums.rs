@@ -30,14 +30,16 @@ pub enum Category {
 }
 
 /// Importance level of a fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Ordered from highest to lowest: Critical > High > Normal > Low
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Importance {
-    Critical,
-    High,
+    Low = 0,
     #[default]
-    Normal,
-    Low,
+    Normal = 1,
+    High = 2,
+    Critical = 3,
 }
 
 /// Certainty level of a fact.

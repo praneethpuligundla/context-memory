@@ -13,6 +13,14 @@ pub struct Fact {
     pub id: Uuid,
     pub content: String,
 
+    // Project context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+
+    // Session context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+
     // Source provenance
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -55,6 +63,8 @@ impl Fact {
         Self {
             id: Uuid::new_v4(),
             content: content.into(),
+            project_path: None,
+            session_id: None,
             source: None,
             source_type: SourceType::default(),
             source_content_hash: None,
@@ -74,6 +84,18 @@ impl Fact {
             access_count: 0,
             last_accessed: None,
         }
+    }
+
+    /// Set the project path for this fact.
+    pub fn with_project(mut self, project_path: impl Into<String>) -> Self {
+        self.project_path = Some(project_path.into());
+        self
+    }
+
+    /// Set the session ID for this fact.
+    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     /// Set the source location for this fact.
@@ -140,4 +162,14 @@ impl Fact {
         self.supersedes = Some(old_id);
         self
     }
+}
+
+/// A historical version of a fact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactHistoryEntry {
+    pub version: i64,
+    pub content: String,
+    pub confidence: f32,
+    pub changed_at: DateTime<Utc>,
+    pub change_reason: Option<String>,
 }

@@ -6,6 +6,6 @@ mod filter;
 mod relation;
 
 pub use enums::*;
-pub use fact::Fact;
+pub use fact::{Fact, FactHistoryEntry};
 pub use filter::*;
 pub use relation::Relation;

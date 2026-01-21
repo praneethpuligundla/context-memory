@@ -120,6 +120,50 @@ pub fn get_git_commit() -> Option<String> {
         })
 }
 
+/// Get the project root directory.
+///
+/// Tries to find the git repository root, falling back to the current working directory.
+/// Returns a canonicalized absolute path (resolves symlinks).
+pub fn get_project_root() -> Option<String> {
+    // Try git root first
+    if let Some(git_root) = get_git_root() {
+        return canonicalize_path(&git_root);
+    }
+
+    // Fall back to current working directory
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Get the git repository root directory.
+fn get_git_root() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
+/// Canonicalize a path (resolve symlinks, normalize).
+///
+/// Returns None if the path doesn't exist or can't be canonicalized.
+pub fn canonicalize_path(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 /// Verify if a fact's source has changed.
 pub fn verify_source(fact: &Fact) -> Result<bool> {
     let Some(source) = &fact.source else {

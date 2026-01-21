@@ -23,7 +23,7 @@ pub mod validation;
 // Re-export commonly used items at crate root for convenience
 pub use error::{MemoryError, Result};
 pub use types::*;
-pub use utils::{compute_source_hash, extract_topics, get_git_commit, verify_source};
+pub use utils::{canonicalize_path, compute_source_hash, extract_topics, get_git_commit, get_project_root, verify_source};
 pub use validation::*;
 
 // ============================================================================
