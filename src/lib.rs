@@ -8,10 +8,14 @@
 //! - [`types`] - Core data structures (Fact, Relation, enums)
 //! - [`validation`] - Input validation functions and security constants
 //! - [`utils`] - Utility functions for hashing, topic extraction
-//! - [`storage`] - SQLite storage layer with FTS5 search
+//! - [`storage`] - SQLite storage layer with FTS5 search and connection pooling
 //! - [`server`] - MCP server implementation
 //! - [`tools`] - MCP tool handlers
+//! - [`daemon`] - Daemon mode for multi-client support
+//! - [`client`] - Client mode that bridges stdio to daemon
 
+pub mod client;
+pub mod daemon;
 pub mod error;
 pub mod server;
 pub mod storage;

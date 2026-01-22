@@ -2,12 +2,26 @@
 //!
 //! A persistent, context-rot-resistant memory system for Claude Code.
 //!
-//! Run as MCP server:
-//!   context-memory
+//! ## Modes
 //!
-//! The server uses stdio transport and stores data at ~/.claude/context-memory/memory.db
+//! - **Default (client)**: Connects to daemon, auto-starting it if needed
+//! - **`--daemon`**: Run as background daemon accepting socket connections
+//!
+//! The daemon architecture allows multiple Claude Code sessions to share
+//! the same memory database without lock conflicts.
 
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+#[derive(Parser)]
+#[command(name = "context-memory")]
+#[command(about = "Context-rot-resistant memory for Claude Code")]
+#[command(version)]
+struct Cli {
+    /// Run as daemon (background server accepting socket connections)
+    #[arg(long)]
+    daemon: bool,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,13 +34,22 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Determine database path
-    let db_path = dirs::home_dir()
-        .map(|h| h.join(".claude").join("context-memory").join("memory.db"))
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let cli = Cli::parse();
 
-    let db_path_str = db_path.to_string_lossy().to_string();
+    if cli.daemon {
+        // Determine database path
+        let db_path = dirs::home_dir()
+            .map(|h| h.join(".claude").join("context-memory").join("memory.db"))
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
-    // Run the MCP server
-    context_memory::server::run_server(&db_path_str).await
+        let db_path_str = db_path.to_string_lossy().to_string();
+
+        // Run as daemon (listens on Unix socket, accepts multiple clients)
+        tracing::info!("Starting context-memory daemon");
+        tracing::info!("Database: {}", db_path_str);
+        context_memory::daemon::run_daemon(&db_path_str).await
+    } else {
+        // Default: client mode (auto-starts daemon, bridges stdio to socket)
+        context_memory::client::run_client().await
+    }
 }

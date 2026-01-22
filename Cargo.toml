@@ -23,7 +23,10 @@ path = "src/lib.rs"
 
 [dependencies]
 # MCP Protocol (official Rust SDK)
-rmcp = { version = "0.13", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.13", features = ["server", "transport-io", "transport-async-rw", "macros"] }
+
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
 
 # JSON Schema generation (must match rmcp's version)
 schemars = "1.2"
@@ -31,8 +34,10 @@ schemars = "1.2"
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 
-# SQLite
-rusqlite = { version = "0.32", features = ["bundled", "functions"] }
+# SQLite with connection pooling
+rusqlite = { version = "0.38", features = ["bundled", "functions"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.32"
 
 # JSON
 serde = { version = "1.0", features = ["derive"] }

@@ -1,4 +1,4 @@
-//! SQLite storage layer with FTS5 full-text search.
+//! SQLite storage layer with FTS5 full-text search and connection pooling.
 
 use crate::error::Result;
 use crate::types::{
@@ -6,6 +6,8 @@ use crate::types::{
     Scope, SourceType,
 };
 use chrono::{DateTime, Utc};
+use r2d2::{Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use uuid::Uuid;
@@ -41,46 +43,82 @@ fn sanitize_fts5_query(query: &str) -> String {
 }
 
 /// SQLite-backed storage for facts and relations.
+///
+/// Uses r2d2 connection pooling for concurrent access.
+/// Clone-able - each clone shares the same pool.
+#[derive(Clone)]
 pub struct Storage {
-    conn: Connection,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl Storage {
-    /// Create new storage, initializing database at path.
+    /// Create new storage with connection pool, initializing database at path.
     pub fn new(db_path: impl AsRef<Path>) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(db_path)?;
-        let storage = Self { conn };
+        let manager = SqliteConnectionManager::file(&db_path);
+        let pool = Pool::builder()
+            .max_size(4)  // Allow up to 4 concurrent connections
+            .build(manager)
+            .map_err(|e| crate::error::MemoryError::Database(
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(1),
+                    Some(e.to_string()),
+                )
+            ))?;
+
+        let storage = Self { pool };
         storage.init_schema()?;
         Ok(storage)
     }
 
     /// Create in-memory storage for testing.
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let storage = Self { conn };
+        let manager = SqliteConnectionManager::memory();
+        let pool = Pool::builder()
+            .max_size(1)  // In-memory DB needs single connection to persist
+            .build(manager)
+            .map_err(|e| crate::error::MemoryError::Database(
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(1),
+                    Some(e.to_string()),
+                )
+            ))?;
+
+        let storage = Self { pool };
         storage.init_schema()?;
         Ok(storage)
     }
 
+    /// Get a connection from the pool.
+    fn conn(&self) -> Result<PooledConnection<SqliteConnectionManager>> {
+        self.pool.get().map_err(|e| crate::error::MemoryError::Database(
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some(e.to_string()),
+            )
+        ))
+    }
+
     fn init_schema(&self) -> Result<()> {
+        let conn = self.conn()?;
+
         // Security: Enable foreign key enforcement (disabled by default in SQLite)
-        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
         // Reliability: Set busy timeout to prevent lock contention errors (5 seconds)
-        self.conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
 
         // Performance: Use WAL mode for better concurrent access
-        self.conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
 
         // Security: Ensure secure delete (overwrite deleted data)
-        self.conn.execute_batch("PRAGMA secure_delete = ON;")?;
+        conn.execute_batch("PRAGMA secure_delete = ON;")?;
 
-        self.conn.execute_batch(
+        conn.execute_batch(
             r#"
             -- Main facts table
             CREATE TABLE IF NOT EXISTS facts (
@@ -223,23 +261,23 @@ impl Storage {
             "#,
         )?;
 
-        // Migrations for existing databases
-        self.migrate_add_archived_column()?;
-        self.migrate_add_project_path_column()?;
-        self.migrate_add_session_id_column()?;
+        // Migrations for existing databases (reuse the same connection)
+        Self::migrate_add_archived_column(&conn)?;
+        Self::migrate_add_project_path_column(&conn)?;
+        Self::migrate_add_session_id_column(&conn)?;
 
         Ok(())
     }
 
     // ========================================================================
-    // Migrations
+    // Migrations (take connection reference to avoid pool exhaustion)
     // ========================================================================
 
     /// Migration: Add archived column if it doesn't exist (for existing databases).
-    fn migrate_add_archived_column(&self) -> Result<()> {
-        let columns = self.get_table_columns("facts")?;
+    fn migrate_add_archived_column(conn: &Connection) -> Result<()> {
+        let columns = Self::get_table_columns_with_conn(conn, "facts")?;
         if !columns.contains(&"archived".to_string()) {
-            self.conn.execute(
+            conn.execute(
                 "ALTER TABLE facts ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
@@ -248,10 +286,10 @@ impl Storage {
     }
 
     /// Migration: Add project_path column if it doesn't exist (for existing databases).
-    fn migrate_add_project_path_column(&self) -> Result<()> {
-        let columns = self.get_table_columns("facts")?;
+    fn migrate_add_project_path_column(conn: &Connection) -> Result<()> {
+        let columns = Self::get_table_columns_with_conn(conn, "facts")?;
         if !columns.contains(&"project_path".to_string()) {
-            self.conn.execute(
+            conn.execute(
                 "ALTER TABLE facts ADD COLUMN project_path TEXT",
                 [],
             )?;
@@ -260,10 +298,10 @@ impl Storage {
     }
 
     /// Migration: Add session_id column if it doesn't exist (for existing databases).
-    fn migrate_add_session_id_column(&self) -> Result<()> {
-        let columns = self.get_table_columns("facts")?;
+    fn migrate_add_session_id_column(conn: &Connection) -> Result<()> {
+        let columns = Self::get_table_columns_with_conn(conn, "facts")?;
         if !columns.contains(&"session_id".to_string()) {
-            self.conn.execute(
+            conn.execute(
                 "ALTER TABLE facts ADD COLUMN session_id TEXT",
                 [],
             )?;
@@ -271,9 +309,9 @@ impl Storage {
         Ok(())
     }
 
-    /// Helper: Get column names for a table.
-    fn get_table_columns(&self, table: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    /// Helper: Get column names for a table (using provided connection).
+    fn get_table_columns_with_conn(conn: &Connection, table: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
         let columns = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -286,7 +324,8 @@ impl Storage {
 
     /// Store a new fact.
     pub fn insert_fact(&self, fact: &Fact) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
 
         tx.execute(
             r#"
@@ -345,19 +384,22 @@ impl Storage {
 
     /// Get a fact by ID.
     pub fn get_fact(&self, id: Uuid) -> Result<Option<Fact>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT id, content, project_path, session_id, source, source_type, source_content_hash, git_commit,
-                   confidence, certainty, created_at, last_verified, stale,
-                   category, importance, scope, derived_from, supersedes,
-                   access_count, last_accessed
-            FROM facts WHERE id = ?1
-            "#,
-        )?;
+        // Get the fact first, then drop the connection before loading topics/evidence
+        let fact = {
+            let conn = self.conn()?;
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT id, content, project_path, session_id, source, source_type, source_content_hash, git_commit,
+                       confidence, certainty, created_at, last_verified, stale,
+                       category, importance, scope, derived_from, supersedes,
+                       access_count, last_accessed
+                FROM facts WHERE id = ?1
+                "#,
+            )?;
 
-        let fact = stmt
-            .query_row(params![id.to_string()], |row| self.row_to_fact(row))
-            .optional()?;
+            stmt.query_row(params![id.to_string()], |row| self.row_to_fact(row))
+                .optional()?
+        }; // Connection dropped here
 
         match fact {
             Some(mut f) => {
@@ -376,7 +418,8 @@ impl Storage {
 
     /// Update a fact with a reason for the change.
     pub fn update_fact_with_reason(&self, fact: &Fact, change_reason: Option<&str>) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
 
         // Get current version for history
         if let Some(old_fact) = self.get_fact_internal(&tx, fact.id)? {
@@ -486,7 +529,7 @@ impl Storage {
 
     /// Delete a fact.
     pub fn delete_fact(&self, id: Uuid) -> Result<bool> {
-        let rows = self.conn.execute(
+        let rows = self.conn()?.execute(
             "DELETE FROM facts WHERE id = ?1",
             params![id.to_string()],
         )?;
@@ -621,9 +664,12 @@ impl Storage {
 
         sql.push_str(" ORDER BY score DESC, f.importance DESC LIMIT ?");
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        // Scope the connection so it's dropped before we call get_topics_batch/get_evidence_batch
+        let mut facts: Vec<Fact> = {
+            let conn = self.conn()?;
+            let mut stmt = conn.prepare(&sql)?;
 
-        let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         // FTS5 query and topic terms come first (for the CTE)
         if use_fts {
@@ -670,9 +716,9 @@ impl Storage {
 
         let params: Vec<&dyn rusqlite::ToSql> = bind_params.iter().map(|b| b.as_ref()).collect();
 
-        let mut facts: Vec<Fact> = stmt
-            .query_map(params.as_slice(), |row| self.row_to_fact(row))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            let rows = stmt.query_map(params.as_slice(), |row| self.row_to_fact(row))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        }; // Connection dropped here
 
         // Batch load topics and evidence (avoids N+1 query problem)
         if !facts.is_empty() {
@@ -710,7 +756,8 @@ impl Storage {
 
         if let Some(hours) = threshold_hours {
             let threshold = Utc::now() - chrono::Duration::hours(hours);
-            let mut stmt = self.conn.prepare(
+            let conn = self.conn()?;
+        let mut stmt = conn.prepare(
                 r#"
                 SELECT id, content, project_path, session_id, source, source_type, source_content_hash, git_commit,
                        confidence, certainty, created_at, last_verified, stale,
@@ -732,7 +779,8 @@ impl Storage {
                 facts.push(fact);
             }
         } else {
-            let mut stmt = self.conn.prepare(
+            let conn = self.conn()?;
+        let mut stmt = conn.prepare(
                 r#"
                 SELECT id, content, project_path, session_id, source, source_type, source_content_hash, git_commit,
                        confidence, certainty, created_at, last_verified, stale,
@@ -784,7 +832,8 @@ impl Storage {
             let cat_str = format!("{:?}", cat).to_lowercase();
 
             // Get facts for this category
-            let mut stmt = self.conn.prepare(
+            let conn = self.conn()?;
+        let mut stmt = conn.prepare(
                 r#"
                 SELECT id, content, project_path, session_id, source, source_type, source_content_hash,
                        git_commit, confidence, certainty, created_at, last_verified, stale,
@@ -834,12 +883,13 @@ impl Storage {
 
     /// List all topics with counts.
     pub fn list_topics(&self) -> Result<Vec<(String, usize)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             "SELECT topic, COUNT(*) as cnt FROM fact_topics GROUP BY topic ORDER BY cnt DESC",
         )?;
 
         let topics = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?)))?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(topics)
@@ -851,7 +901,7 @@ impl Storage {
 
     /// Add a relation between facts.
     pub fn insert_relation(&self, relation: &Relation) -> Result<()> {
-        self.conn.execute(
+        self.conn()?.execute(
             r#"
             INSERT OR REPLACE INTO relations (from_id, to_id, relation_type, created_at, metadata)
             VALUES (?1, ?2, ?3, ?4, ?5)
@@ -869,7 +919,7 @@ impl Storage {
 
     /// Remove a relation.
     pub fn delete_relation(&self, from_id: Uuid, to_id: Uuid, relation_type: RelationType) -> Result<bool> {
-        let rows = self.conn.execute(
+        let rows = self.conn()?.execute(
             "DELETE FROM relations WHERE from_id = ?1 AND to_id = ?2 AND relation_type = ?3",
             params![
                 from_id.to_string(),
@@ -882,7 +932,8 @@ impl Storage {
 
     /// Get relations for a fact.
     pub fn get_relations(&self, fact_id: Uuid) -> Result<Vec<Relation>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT from_id, to_id, relation_type, created_at, metadata
             FROM relations
@@ -923,7 +974,8 @@ impl Storage {
 
     /// Find contradictions (facts with Contradicts relations).
     pub fn find_contradictions(&self) -> Result<Vec<(Fact, Fact, String)>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT from_id, to_id, metadata
             FROM relations
@@ -1007,9 +1059,8 @@ impl Storage {
     }
 
     fn get_topics(&self, fact_id: Uuid) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT topic FROM fact_topics WHERE fact_id = ?1")?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT topic FROM fact_topics WHERE fact_id = ?1")?;
         let topics = stmt
             .query_map(params![fact_id.to_string()], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1026,7 +1077,8 @@ impl Storage {
 
         let placeholders = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT fact_id, topic FROM fact_topics WHERE fact_id IN ({})", placeholders);
-        let mut stmt = self.conn.prepare(&sql)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
 
         let params: Vec<&dyn rusqlite::ToSql> = fact_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
 
@@ -1044,9 +1096,8 @@ impl Storage {
     }
 
     fn get_evidence(&self, fact_id: Uuid) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT evidence FROM fact_evidence WHERE fact_id = ?1")?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT evidence FROM fact_evidence WHERE fact_id = ?1")?;
         let evidence = stmt
             .query_map(params![fact_id.to_string()], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1063,7 +1114,8 @@ impl Storage {
 
         let placeholders = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT fact_id, evidence FROM fact_evidence WHERE fact_id IN ({})", placeholders);
-        let mut stmt = self.conn.prepare(&sql)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
 
         let params: Vec<&dyn rusqlite::ToSql> = fact_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
 
@@ -1085,7 +1137,7 @@ impl Storage {
     /// Confidence is boosted by 2% per access (capped at 1.0).
     /// This reinforces frequently-used facts.
     pub fn mark_accessed(&self, id: Uuid) -> Result<()> {
-        self.conn.execute(
+        self.conn()?.execute(
             r#"
             UPDATE facts SET
                 access_count = access_count + 1,
@@ -1100,7 +1152,7 @@ impl Storage {
 
     /// Mark fact as stale.
     pub fn mark_stale(&self, id: Uuid, stale: bool) -> Result<()> {
-        self.conn.execute(
+        self.conn()?.execute(
             "UPDATE facts SET stale = ?2 WHERE id = ?1",
             params![id.to_string(), stale as i32],
         )?;
@@ -1109,7 +1161,7 @@ impl Storage {
 
     /// Update last_verified timestamp.
     pub fn mark_verified(&self, id: Uuid) -> Result<()> {
-        self.conn.execute(
+        self.conn()?.execute(
             "UPDATE facts SET last_verified = ?2, stale = 0 WHERE id = ?1",
             params![id.to_string(), Utc::now().to_rfc3339()],
         )?;
@@ -1118,8 +1170,8 @@ impl Storage {
 
     /// Get total fact count.
     pub fn count_facts(&self) -> Result<usize> {
-        let count: i64 = self
-            .conn
+        let conn = self.conn()?;
+        let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM facts WHERE archived = 0", [], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -1130,7 +1182,7 @@ impl Storage {
 
     /// Archive a fact (soft-delete).
     pub fn archive_fact(&self, id: Uuid) -> Result<bool> {
-        let rows = self.conn.execute(
+        let rows = self.conn()?.execute(
             "UPDATE facts SET archived = 1 WHERE id = ?1 AND archived = 0",
             params![id.to_string()],
         )?;
@@ -1139,7 +1191,7 @@ impl Storage {
 
     /// Unarchive a fact.
     pub fn unarchive_fact(&self, id: Uuid) -> Result<bool> {
-        let rows = self.conn.execute(
+        let rows = self.conn()?.execute(
             "UPDATE facts SET archived = 0 WHERE id = ?1 AND archived = 1",
             params![id.to_string()],
         )?;
@@ -1157,7 +1209,8 @@ impl Storage {
         let threshold_str = threshold.to_rfc3339();
 
         // Get facts eligible for decay (not accessed recently, not archived)
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT id, confidence FROM facts
             WHERE archived = 0
@@ -1179,7 +1232,7 @@ impl Storage {
             let new_confidence = (old_confidence * decay_factor).max(0.1); // Floor at 0.1
             total_reduction += old_confidence - new_confidence;
 
-            self.conn.execute(
+            self.conn()?.execute(
                 "UPDATE facts SET confidence = ?2 WHERE id = ?1",
                 params![id, new_confidence],
             )?;
@@ -1201,7 +1254,8 @@ impl Storage {
         let threshold_str = threshold.to_rfc3339();
 
         // Find facts to prune
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT id FROM facts
             WHERE archived = 0
@@ -1237,7 +1291,8 @@ impl Storage {
     /// Returns pairs of facts with similarity scores (0.0-1.0 based on topic overlap).
     pub fn find_similar_facts(&self, min_similarity: f32) -> Result<Vec<(Fact, Fact, f32)>> {
         // Find fact pairs that share topics
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT DISTINCT
                 f1.id as id1,
@@ -1314,7 +1369,8 @@ impl Storage {
 
         // Get all facts that have at least one of the topics
         let topics_json = serde_json::to_string(new_topics)?;
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT DISTINCT f.id, f.content, f.project_path, f.session_id, f.source, f.source_type,
                    f.source_content_hash, f.git_commit, f.confidence, f.certainty,
@@ -1364,7 +1420,8 @@ impl Storage {
 
     /// Get the history of changes for a fact.
     pub fn get_fact_history(&self, fact_id: Uuid) -> Result<Vec<FactHistoryEntry>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT version, content, confidence, changed_at, change_reason
             FROM fact_history
@@ -1399,7 +1456,8 @@ impl Storage {
 
     /// Get archived facts.
     pub fn get_archived_facts(&self, limit: usize) -> Result<Vec<Fact>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT id, content, project_path, session_id, source, source_type, source_content_hash, git_commit,
                    confidence, certainty, created_at, last_verified, stale,
