@@ -683,12 +683,12 @@ impl ServerHandler for ContextMemoryServer {
             server_info: Implementation::from_build_env(),
             instructions: Some(
                 "Context-rot-resistant memory for Claude Code. \
-                 Use remember/recall/forget for facts, verify/get_stale for staleness, \
-                 link/get_related for relationships. \
-                 Use decay/prune/consolidate for memory maintenance, \
-                 archive/unarchive/get_archived for soft-delete. \
-                 Use get_session_facts to see what was learned this session, \
-                 or filter recall with session_id."
+                 PROACTIVE MEMORY: Automatically remember important discoveries, \
+                 architectural decisions, user preferences, and notable patterns \
+                 without being asked. Use recall at session start to load relevant context. \
+                 Tools: remember/recall/forget for facts, verify/get_stale for staleness, \
+                 link/get_related for relationships, decay/prune/consolidate for maintenance, \
+                 archive/unarchive/get_archived for soft-delete, get_session_facts for session review."
                     .into(),
             ),
         }
