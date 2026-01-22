@@ -30,15 +30,54 @@ Context-rot-resistant memory MCP server for Claude Code. Gives Claude persistent
 
 ## Architecture
 
+### Daemon/Client Model
+
+Context Memory uses a daemon architecture for concurrent session support. Multiple Claude Code sessions can safely share the same memory database.
+
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                              Claude Code                                    │
-│                                                                            │
-│   "Remember that the API uses JWT"    "What do I know about auth?"        │
-└────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ MCP Protocol (stdio)
-                                    ▼
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│  Claude Code #1  │   │  Claude Code #2  │   │  Claude Code #3  │
+│                  │   │                  │   │                  │
+│  MCP (stdio)     │   │  MCP (stdio)     │   │  MCP (stdio)     │
+└────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         │                      │                      │
+         ▼                      ▼                      ▼
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│  Client Process  │   │  Client Process  │   │  Client Process  │
+│  (stdio bridge)  │   │  (stdio bridge)  │   │  (stdio bridge)  │
+└────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         │                      │                      │
+         └──────────────────────┼──────────────────────┘
+                                │
+                    Unix Socket │ (~/.claude/context-memory/daemon.sock)
+                                ▼
+         ┌──────────────────────────────────────────────────────┐
+         │                    Daemon Process                     │
+         │                                                       │
+         │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐     │
+         │  │ MCP Server  │ │ MCP Server  │ │ MCP Server  │     │
+         │  │ (session 1) │ │ (session 2) │ │ (session 3) │     │
+         │  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘     │
+         │         └───────────────┼───────────────┘            │
+         │                         ▼                            │
+         │              ┌─────────────────────┐                 │
+         │              │   Shared Storage    │                 │
+         │              │   (Connection Pool) │                 │
+         │              └──────────┬──────────┘                 │
+         └─────────────────────────┼────────────────────────────┘
+                                   │
+                                   ▼
+                     ~/.claude/context-memory/memory.db
+```
+
+**How it works:**
+1. **Client mode** (default): Spawned by Claude Code, bridges stdio ↔ daemon socket
+2. **Daemon mode** (`--daemon`): Long-running process accepting concurrent connections
+3. **Auto-start**: Client auto-starts daemon if not running
+
+### Internal Architecture
+
+```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                         Context Memory Server                               │
 │                                                                            │
@@ -74,9 +113,6 @@ Context-rot-resistant memory MCP server for Claude Code. Gives Claude persistent
 │  │                        SQLite + WAL Mode                             │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                      ~/.claude/context-memory/memory.db
 ```
 
 ### Data Flow
@@ -284,9 +320,20 @@ When storing new facts:
 | `CONTEXT_MEMORY_DECAY_FACTOR` | 0.95 | Decay multiplier (0.95 = 5% decay) |
 | `CONTEXT_MEMORY_SKIP_MAINTENANCE` | 0 | Set to "1" to skip startup maintenance |
 
-### Database Location
+### Files
 
-Default: `~/.claude/context-memory/memory.db`
+| Path | Description |
+|------|-------------|
+| `~/.claude/context-memory/memory.db` | SQLite database |
+| `~/.claude/context-memory/daemon.sock` | Unix socket for client↔daemon IPC |
+| `~/.claude/context-memory/daemon.pid` | PID file for daemon process |
+
+### Command Line
+
+```bash
+context-memory          # Run in client mode (default, used by Claude Code)
+context-memory --daemon # Run as daemon (auto-started by client if needed)
+```
 
 ## Security
 
