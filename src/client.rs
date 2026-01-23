@@ -44,13 +44,17 @@ pub fn start_daemon() -> anyhow::Result<()> {
         .stderr(Stdio::inherit()) // Keep stderr for logging
         .spawn()?;
 
-    // Wait for socket to be ready (up to 5 seconds)
+    Ok(())
+}
+
+/// Wait for the daemon socket to be ready (async, non-blocking).
+pub async fn wait_for_daemon_socket() -> anyhow::Result<()> {
     let socket = socket_path();
     for _ in 0..50 {
         if socket.exists() {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
     anyhow::bail!("Daemon failed to start within 5 seconds")
@@ -67,6 +71,7 @@ pub async fn run_client() -> anyhow::Result<()> {
     if !is_daemon_running() {
         tracing::info!("Daemon not running, starting...");
         start_daemon()?;
+        wait_for_daemon_socket().await?;
         tracing::info!("Daemon started");
     }
 

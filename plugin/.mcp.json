@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "context-memory": {
-      "command": "/Users/ppuligundla/claude/context-memory/target/release/context-memory",
+      "command": "${CLAUDE_PLUGIN_ROOT}/../target/release/context-memory",
       "args": [],
       "env": {}
     }

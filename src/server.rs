@@ -699,8 +699,15 @@ impl ServerHandler for ContextMemoryServer {
 pub async fn run_server(db_path: &str) -> anyhow::Result<()> {
     let storage = Storage::new(db_path)?;
 
-    // Run auto-maintenance on startup (configurable via env vars)
-    run_startup_maintenance(&storage)?;
+    // Run auto-maintenance in background (non-blocking startup)
+    let maintenance_storage = storage.clone();
+    tokio::spawn(async move {
+        // Small delay to let server start first
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Err(e) = run_startup_maintenance(&maintenance_storage) {
+            tracing::warn!("Background maintenance failed: {}", e);
+        }
+    });
 
     let server = ContextMemoryServer::new(storage);
 

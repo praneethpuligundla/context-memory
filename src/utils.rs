@@ -113,21 +113,65 @@ pub fn extract_topics(content: &str) -> Vec<String> {
     topics
 }
 
-/// Get current git commit hash if in a git repository.
-pub fn get_git_commit() -> Option<String> {
-    std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
+/// Run a command with a timeout to prevent hangs.
+fn run_command_with_timeout(cmd: &mut std::process::Command, timeout_ms: u64) -> Option<std::process::Output> {
+    use std::time::{Duration, Instant};
+
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Process finished
+                let stdout = child.stdout.take().and_then(|mut s| {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    s.read_to_end(&mut buf).ok().map(|_| buf)
+                }).unwrap_or_default();
+                let stderr = child.stderr.take().and_then(|mut s| {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    s.read_to_end(&mut buf).ok().map(|_| buf)
+                }).unwrap_or_default();
+
+                return Some(std::process::Output { status, stdout, stderr });
             }
-        })
+            Ok(None) => {
+                // Still running
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Get current git commit hash if in a git repository.
+/// Times out after 2 seconds to prevent hangs on slow repos.
+pub fn get_git_commit() -> Option<String> {
+    run_command_with_timeout(
+        std::process::Command::new("git").args(["rev-parse", "HEAD"]),
+        2000,
+    )
+    .and_then(|output| {
+        if output.status.success() {
+            String::from_utf8(output.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Cached project root to avoid repeated subprocess calls.
@@ -156,20 +200,21 @@ pub fn get_project_root() -> Option<String> {
 }
 
 /// Get the git repository root directory.
+/// Times out after 2 seconds to prevent hangs on slow repos.
 fn get_git_root() -> Option<String> {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
+    run_command_with_timeout(
+        std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]),
+        2000,
+    )
+    .and_then(|output| {
+        if output.status.success() {
+            String::from_utf8(output.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Canonicalize a path (resolve symlinks, normalize).
